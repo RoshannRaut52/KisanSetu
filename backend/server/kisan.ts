@@ -1,430 +1,95 @@
 import { nanoid } from "nanoid";
+import { hasDatabaseConfig, query, transaction } from "./db";
+import * as memory from "./kisan-memory";
 
-type BookingStatus =
-  | "BOOKED"
-  | "ARRIVED"
-  | "PROCESSING"
-  | "QC_PASSED"
-  | "WEIGHED"
-  | "COMPLETED"
-  | "DELAYED";
+export type Centre = memory.Centre;
+export type Booking = memory.Booking;
+export type Snapshot = ReturnType<typeof memory.getSnapshot>;
+type BookingInput = { crop: string; quantity: number; centreId: string; slot: string };
+type CentreInput = { centreId: string; minutes: number; reason: string };
+type StatusInput = { bookingId: string; status: Exclude<Booking["status"], "DELAYED"> };
+type WeighmentInput = { bookingId: string; gross: number; tare: number };
 
-type Stage = "Gate Entry" | "Quality Check" | "Weighment" | "Payment";
-
-export type Centre = {
-  id: string;
-  name: string;
-  location: string;
-  operatingHours: string;
-  status: "ACTIVE" | "DELAYED" | "PAUSED";
-  queueSize: number;
-  capacityPct: number;
-  waitMinutes: number;
-  dailyCapacity: number;
-  slots: string[];
+const useDatabase = () => hasDatabaseConfig();
+const centreCode = (id: string) => id === "centre-a" ? "NANDGAON-A" : "GOKUL-B";
+const cropName = (crop: string) => crop;
+const cropLimit = (crop: string) => ({ Paddy: 17, Wheat: 14, Maize: 15 }[crop] ?? 17);
+const cropPrice = (crop: string) => ({ Paddy: 2320, Wheat: 2275, Maize: 2090 }[crop] ?? 0);
+const parseSlot = (slot: string) => {
+  const match = slot.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+  const date = new Date();
+  if (!match) return new Date(date.getTime() + 60 * 60_000);
+  let hour = Number(match[1]);
+  if (match[3].toUpperCase() === "PM" && hour !== 12) hour += 12;
+  if (match[3].toUpperCase() === "AM" && hour === 12) hour = 0;
+  date.setHours(hour, Number(match[2]), 0, 0);
+  return date;
 };
+const bookingStatus = (status: string) => status as Booking["status"];
 
-export type Booking = {
-  id: string;
-  token: string;
-  farmerName: string;
-  farmerMobile: string;
-  crop: string;
-  quantity: number;
-  centreId: string;
-  centreName: string;
-  slot: string;
-  eta: string;
-  processingMinutes: number;
-  queuePosition: number;
-  status: BookingStatus;
-  stage: Stage;
-  lastUpdated: string;
-  delayMinutes: number;
-  price: number;
-  qc: { moisture: number; limit: number; result: "PASSED" | "PENDING" };
-  weighment: { gross: number; tare: number; net: number } | null;
-  paymentStatus: "NOT_STARTED" | "DBT_PROCESSING_INITIATED";
-};
-
-type Activity = {
-  id: string;
-  type: string;
-  message: string;
-  timestamp: string;
-  tone: "green" | "amber" | "blue" | "slate";
-};
-
-type Notification = {
-  id: string;
-  title: string;
-  body: string;
-  channel: "Portal" | "SMS" | "WhatsApp";
-  timestamp: string;
-  unread: boolean;
-};
-
-const priceByCrop: Record<string, number> = { Paddy: 2320, Wheat: 2275, Maize: 2090 };
-const cropLimits: Record<string, number> = { Paddy: 17, Wheat: 14, Maize: 15 };
-const nowIso = () => new Date().toISOString();
-const atMinutes = (minutes: number) => new Date(Date.now() + minutes * 60_000).toISOString();
-
-const centres: Centre[] = [
-  {
-    id: "centre-a",
-    name: "Nandgaon Procurement Centre",
-    location: "Nandgaon · 4.2 km",
-    operatingHours: "08:00 – 18:00",
-    status: "ACTIVE",
-    queueSize: 0,
-    capacityPct: 74,
-    waitMinutes: 34,
-    dailyCapacity: 28,
-    slots: ["10:30 AM", "11:15 AM", "12:00 PM", "01:30 PM"],
-  },
-  {
-    id: "centre-b",
-    name: "Gokul Mandi Yard",
-    location: "Gokul · 8.7 km",
-    operatingHours: "08:30 – 17:30",
-    status: "ACTIVE",
-    queueSize: 0,
-    capacityPct: 48,
-    waitMinutes: 52,
-    dailyCapacity: 36,
-    slots: ["11:00 AM", "12:15 PM", "02:00 PM", "03:00 PM"],
-  },
-];
-
-const bookings: Booking[] = [
-  {
-    id: "booking-a104",
-    token: "A104",
-    farmerName: "Ramesh Kumar",
-    farmerMobile: "98XXXXXX42",
-    crop: "Paddy",
-    quantity: 50,
-    centreId: "centre-a",
-    centreName: centres[0].name,
-    slot: "10:30 AM – 11:15 AM",
-    eta: atMinutes(38),
-    processingMinutes: 42,
-    queuePosition: 3,
-    status: "BOOKED",
-    stage: "Gate Entry",
-    lastUpdated: nowIso(),
-    delayMinutes: 0,
-    price: 2320,
-    qc: { moisture: 0, limit: 17, result: "PENDING" },
-    weighment: null,
-    paymentStatus: "NOT_STARTED",
-  },
-  {
-    id: "booking-a103",
-    token: "A103",
-    farmerName: "Suresh Patil",
-    farmerMobile: "99XXXXXX18",
-    crop: "Wheat",
-    quantity: 28,
-    centreId: "centre-a",
-    centreName: centres[0].name,
-    slot: "10:00 AM – 10:30 AM",
-    eta: atMinutes(10),
-    processingMinutes: 24,
-    queuePosition: 1,
-    status: "PROCESSING",
-    stage: "Quality Check",
-    lastUpdated: nowIso(),
-    delayMinutes: 0,
-    price: 2275,
-    qc: { moisture: 13.2, limit: 14, result: "PASSED" },
-    weighment: null,
-    paymentStatus: "NOT_STARTED",
-  },
-  {
-    id: "booking-a105",
-    token: "A105",
-    farmerName: "Meena Devi",
-    farmerMobile: "97XXXXXX65",
-    crop: "Maize",
-    quantity: 35,
-    centreId: "centre-a",
-    centreName: centres[0].name,
-    slot: "11:15 AM – 12:00 PM",
-    eta: atMinutes(66),
-    processingMinutes: 31,
-    queuePosition: 4,
-    status: "ARRIVED",
-    stage: "Gate Entry",
-    lastUpdated: nowIso(),
-    delayMinutes: 0,
-    price: 2090,
-    qc: { moisture: 0, limit: 15, result: "PENDING" },
-    weighment: null,
-    paymentStatus: "NOT_STARTED",
-  },
-  {
-    id: "booking-a106",
-    token: "A106",
-    farmerName: "Harish Singh",
-    farmerMobile: "96XXXXXX27",
-    crop: "Paddy",
-    quantity: 18,
-    centreId: "centre-a",
-    centreName: centres[0].name,
-    slot: "12:00 PM – 12:30 PM",
-    eta: atMinutes(96),
-    processingMinutes: 19,
-    queuePosition: 5,
-    status: "BOOKED",
-    stage: "Gate Entry",
-    lastUpdated: nowIso(),
-    delayMinutes: 0,
-    price: 2320,
-    qc: { moisture: 0, limit: 17, result: "PENDING" },
-    weighment: null,
-    paymentStatus: "NOT_STARTED",
-  },
-  {
-    id: "booking-b201",
-    token: "B201",
-    farmerName: "Kavita Yadav",
-    farmerMobile: "95XXXXXX11",
-    crop: "Wheat",
-    quantity: 40,
-    centreId: "centre-b",
-    centreName: centres[1].name,
-    slot: "11:00 AM – 11:45 AM",
-    eta: atMinutes(52),
-    processingMinutes: 36,
-    queuePosition: 1,
-    status: "BOOKED",
-    stage: "Gate Entry",
-    lastUpdated: nowIso(),
-    delayMinutes: 0,
-    price: 2275,
-    qc: { moisture: 0, limit: 14, result: "PENDING" },
-    weighment: null,
-    paymentStatus: "NOT_STARTED",
-  },
-  {
-    id: "booking-b202",
-    token: "B202",
-    farmerName: "Amit Verma",
-    farmerMobile: "94XXXXXX09",
-    crop: "Paddy",
-    quantity: 22,
-    centreId: "centre-b",
-    centreName: centres[1].name,
-    slot: "12:15 PM – 01:00 PM",
-    eta: atMinutes(91),
-    processingMinutes: 23,
-    queuePosition: 2,
-    status: "BOOKED",
-    stage: "Gate Entry",
-    lastUpdated: nowIso(),
-    delayMinutes: 0,
-    price: 2320,
-    qc: { moisture: 0, limit: 17, result: "PENDING" },
-    weighment: null,
-    paymentStatus: "NOT_STARTED",
-  },
-];
-
-const activity: Activity[] = [
-  { id: "act-1", type: "QUEUE_UPDATED", message: "Queue recalculated after weighment lane opened", timestamp: "2 min ago", tone: "blue" },
-  { id: "act-2", type: "QC_PASSED", message: "Token A103 passed quality check · 13.2% moisture", timestamp: "6 min ago", tone: "green" },
-  { id: "act-3", type: "ARRIVAL", message: "Token A105 marked arrived at gate", timestamp: "11 min ago", tone: "slate" },
-  { id: "act-4", type: "BOOKING_CONFIRMED", message: "New booking B202 confirmed for Gokul Mandi Yard", timestamp: "18 min ago", tone: "green" },
-];
-
-const notifications: Notification[] = [
-  { id: "note-1", title: "Live ETA ready", body: "Your Paddy booking A104 is 3rd in queue. Current ETA: 10:58 AM.", channel: "Portal", timestamp: "Just now", unread: true },
-  { id: "note-2", title: "Booking confirmed", body: "Token A104 reserved at Nandgaon Procurement Centre.", channel: "WhatsApp", timestamp: "18 min ago", unread: false },
-  { id: "note-3", title: "QC completed", body: "Suresh Patil's Wheat lot passed the moisture check.", channel: "SMS", timestamp: "6 min ago", unread: false },
-];
-
-const state = { centres, bookings, activity, notifications, delayMinutes: 0 };
-const baselineBookingIds = new Set(bookings.map((booking) => booking.id));
-const baselineStatus: Record<string, BookingStatus> = {
-  "booking-a104": "BOOKED",
-  "booking-a103": "PROCESSING",
-  "booking-a105": "ARRIVED",
-  "booking-a106": "BOOKED",
-  "booking-b201": "BOOKED",
-  "booking-b202": "BOOKED",
-};
-
-function clone<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
-}
-
-function centreById(id: string) {
-  const centre = state.centres.find((entry) => entry.id === id);
-  if (!centre) throw new Error("Centre not found");
-  return centre;
-}
-
-function recalculateCentre(centreId: string) {
-  const centre = centreById(centreId);
-  const active = state.bookings
-    .filter((booking) => booking.centreId === centreId && booking.status !== "COMPLETED")
-    .sort((a, b) => a.queuePosition - b.queuePosition || a.slot.localeCompare(b.slot));
-  const centreDelay = centre.status === "DELAYED" ? state.delayMinutes : 0;
-  active.forEach((booking, index) => {
-    booking.queuePosition = index + 1;
-    booking.delayMinutes = centreDelay;
-    booking.eta = atMinutes(Math.max(8, 12 + index * 17 + booking.processingMinutes + centreDelay));
-    booking.lastUpdated = nowIso();
-    if (centreDelay > 0 && booking.status === "BOOKED") booking.status = "DELAYED";
-  });
-  centre.queueSize = active.length;
-  centre.waitMinutes = Math.round(18 + active.reduce((sum, booking) => sum + booking.processingMinutes, 0) / Math.max(1, active.length));
-  centre.capacityPct = Math.min(96, Math.max(28, Math.round((active.length / centre.dailyCapacity) * 100 + (centreDelay ? 8 : 0))));
-}
-
-state.centres.forEach((centre) => recalculateCentre(centre.id));
-
-export function getSnapshot() {
-  return clone({
-    centres: state.centres,
-    bookings: state.bookings,
-    activity: state.activity.slice(0, 8),
-    notifications: state.notifications,
-    delayMinutes: state.delayMinutes,
-    system: {
-      sourceOfTruth: "PostgreSQL",
-      liveState: "Redis projection",
-      realtime: "Polling fallback active · WebSocket boundary ready",
-      model: "Random Forest Regressor",
-      dataset: "Synthetic / Prototype Dataset",
-      modelHealthy: true,
-    },
+async function ensureDemoData() {
+  const count = await query<{ count: string }>("SELECT COUNT(*)::text AS count FROM bookings");
+  if (Number(count[0]?.count ?? 0) > 0) return;
+  await transaction(async (client) => {
+    const farmer = await client.query<{ id: string }>(
+      `INSERT INTO users (mobile, name, role) VALUES ('9898989842', 'Ramesh Kumar', 'FARMER') ON CONFLICT (mobile) DO UPDATE SET name = EXCLUDED.name RETURNING id`,
+    );
+    const farmerProfile = await client.query<{ id: string }>(
+      `INSERT INTO farmer_profiles (user_id, farmer_reference, village, district) VALUES ($1, 'FARMER-RK-001', 'Nandgaon', 'Nandgaon district') ON CONFLICT (user_id) DO UPDATE SET farmer_reference = EXCLUDED.farmer_reference RETURNING id`,
+      [farmer.rows[0].id],
+    );
+    const centreRows = await client.query<{ id: string; code: string }>("SELECT id, code FROM centres WHERE code IN ('NANDGAON-A', 'GOKUL-B')");
+    const centresByCode = Object.fromEntries(centreRows.rows.map((row) => [row.code, row.id]));
+    const crops = await client.query<{ id: string; name: string }>("SELECT id, name FROM crops WHERE name IN ('Paddy', 'Wheat', 'Maize')");
+    const cropsByName = Object.fromEntries(crops.rows.map((row) => [row.name, row.id]));
+    const demo = [
+      ['DEMO-A104', 'A104', 'Paddy', 50, 'NANDGAON-A', '10:30 AM', 'BOOKED'],
+      ['DEMO-A103', 'A103', 'Wheat', 28, 'NANDGAON-A', '10:00 AM', 'PROCESSING'],
+      ['DEMO-A105', 'A105', 'Maize', 35, 'NANDGAON-A', '11:15 AM', 'ARRIVED'],
+      ['DEMO-A106', 'A106', 'Paddy', 18, 'NANDGAON-A', '12:00 PM', 'BOOKED'],
+      ['DEMO-B201', 'B201', 'Wheat', 40, 'GOKUL-B', '11:00 AM', 'BOOKED'],
+      ['DEMO-B202', 'B202', 'Paddy', 22, 'GOKUL-B', '12:15 PM', 'BOOKED'],
+    ] as const;
+    for (const [reference, token, crop, quantity, code, slot, status] of demo) {
+      const start = parseSlot(slot); const end = new Date(start.getTime() + 45 * 60_000); const eta = new Date(Date.now() + 40 * 60_000);
+      const booking = await client.query<{ id: string }>(
+        `INSERT INTO bookings (booking_reference, farmer_id, centre_id, crop_id, quantity_qtl, booking_date, slot_start, slot_end, token_number, predicted_processing_minutes, model_version, fallback_used, initial_eta, current_eta, status, configured_price_snapshot, price_source_snapshot)
+         VALUES ($1,$2,$3,$4,$5,CURRENT_DATE,$6,$7,$8,$9,'prototype-rf-v0.3',true,$10,$10,$11::booking_status,$12,'SIH prototype configured reference') RETURNING id`,
+        [reference, farmerProfile.rows[0].id, centresByCode[code], cropsByName[crop], quantity, start, end, token, 24 + quantity / 3, eta, status, cropPrice(crop)],
+      );
+      await client.query(`INSERT INTO queue_entries (booking_id, queue_position, current_eta, queue_status) VALUES ($1,$2,$3,$4::booking_status)`, [booking.rows[0].id, code === 'NANDGAON-A' ? Number(token.slice(1)) - 100 : Number(token.slice(1)) - 200, eta, status]);
+      const stage = status === 'PROCESSING' || status === 'ARRIVED' ? 'QUALITY_CHECK' : 'GATE_ENTRY';
+      const proc = await client.query<{ id: string }>(`INSERT INTO procurement_records (booking_id, current_stage, status) VALUES ($1,$2::procurement_stage,$3::booking_status) RETURNING id`, [booking.rows[0].id, stage, status]);
+      if (status === 'PROCESSING') await client.query(`INSERT INTO qc_records (procurement_id, moisture_reading, allowed_moisture_limit, result) VALUES ($1,13.2,$2,'PASSED')`, [proc.rows[0].id, cropLimit(crop)]);
+    }
   });
 }
 
-export function quoteBooking(input: { crop: string; quantity: number; centreId: string }) {
-  const centre = centreById(input.centreId);
-  const queue = state.bookings.filter((booking) => booking.centreId === input.centreId && booking.status !== "COMPLETED");
-  const predictedMinutes = Math.max(12, Math.min(90, Math.round(12 + input.quantity * 0.48 + queue.length * 3.4)));
-  return {
-    crop: input.crop,
-    quantity: input.quantity,
-    price: priceByCrop[input.crop] ?? 0,
-    predictedMinutes,
-    centre: { ...centre },
-    fallbackUsed: false,
-    explanation: [
-      `${input.quantity} qtl quantity`,
-      `${queue.length} farmers in queue`,
-      `${centre.capacityPct}% centre load`,
-      "recent processing behaviour",
-    ],
-    slots: centre.slots.map((slot, index) => ({ slot, eta: atMinutes(35 + index * 42 + predictedMinutes), available: index < 3 })),
-  };
+async function dbBooking(id: string): Promise<Booking> {
+  const rows = await query<any>(
+    `SELECT b.id, b.token_number AS token, u.name AS farmer_name, u.mobile AS farmer_mobile, c.name AS crop, b.quantity_qtl AS quantity, ce.code, ce.name AS centre_name, ce.address, b.slot_start, b.slot_end, b.current_eta, b.predicted_processing_minutes, qe.queue_position, b.status, pr.current_stage, b.updated_at, b.configured_price_snapshot, COALESCE(qc.moisture_reading,0) AS moisture, COALESCE(qc.allowed_moisture_limit,17) AS moisture_limit, COALESCE(qc.result::text,'PENDING') AS qc_result, w.gross_weight_qtl, w.tare_weight_qtl, w.net_weight_qtl, p.status AS payment_status
+     FROM bookings b JOIN farmer_profiles fp ON fp.id=b.farmer_id JOIN users u ON u.id=fp.user_id JOIN crops c ON c.id=b.crop_id JOIN centres ce ON ce.id=b.centre_id LEFT JOIN queue_entries qe ON qe.booking_id=b.id LEFT JOIN procurement_records pr ON pr.booking_id=b.id LEFT JOIN LATERAL (SELECT * FROM qc_records q WHERE q.procurement_id=pr.id ORDER BY recorded_at DESC LIMIT 1) qc ON TRUE LEFT JOIN weighments w ON w.procurement_id=pr.id LEFT JOIN payments p ON p.procurement_id=pr.id WHERE b.id=$1`, [id],
+  );
+  if (!rows[0]) throw new Error("Booking not found");
+  const row = rows[0];
+  const stage = ({ GATE_ENTRY: "Gate Entry", QUALITY_CHECK: "Quality Check", WEIGHMENT: "Weighment", PAYMENT: "Payment" } as Record<string, Booking["stage"]>)[row.current_stage] ?? "Gate Entry";
+  return { id: row.id, token: row.token, farmerName: row.farmer_name, farmerMobile: row.farmer_mobile, crop: row.crop, quantity: Number(row.quantity), centreId: row.code === "NANDGAON-A" ? "centre-a" : "centre-b", centreName: row.centre_name, slot: `${row.slot_start.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} – ${row.slot_end.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`, eta: new Date(row.current_eta).toISOString(), processingMinutes: Number(row.predicted_processing_minutes), queuePosition: Number(row.queue_position ?? 0), status: bookingStatus(row.status), stage, lastUpdated: new Date(row.updated_at).toISOString(), delayMinutes: 0, price: Number(row.configured_price_snapshot), qc: { moisture: Number(row.moisture), limit: Number(row.moisture_limit), result: row.qc_result === "PASSED" ? "PASSED" : "PENDING" }, weighment: row.net_weight_qtl == null ? null : { gross: Number(row.gross_weight_qtl), tare: Number(row.tare_weight_qtl), net: Number(row.net_weight_qtl) }, paymentStatus: row.payment_status === "DBT_PROCESSING_INITIATED" ? "DBT_PROCESSING_INITIATED" : "NOT_STARTED" };
 }
 
-export function createBooking(input: { crop: string; quantity: number; centreId: string; slot: string }) {
-  if (input.quantity <= 0 || input.quantity > 500) throw new Error("Quantity must be between 1 and 500 quintals");
-  const quote = quoteBooking(input);
-  const tokenNumber = 104 + state.bookings.filter((booking) => booking.centreId === input.centreId).length + 1;
-  const booking: Booking = {
-    id: `booking-${nanoid(7)}`,
-    token: `${input.centreId === "centre-a" ? "A" : "B"}${tokenNumber}`,
-    farmerName: "Ramesh Kumar",
-    farmerMobile: "98XXXXXX42",
-    crop: input.crop,
-    quantity: input.quantity,
-    centreId: input.centreId,
-    centreName: quote.centre.name,
-    slot: input.slot,
-    eta: atMinutes(quote.predictedMinutes + quote.centre.queueSize * 13),
-    processingMinutes: quote.predictedMinutes,
-    queuePosition: quote.centre.queueSize + 1,
-    status: "BOOKED",
-    stage: "Gate Entry",
-    lastUpdated: nowIso(),
-    delayMinutes: quote.centre.status === "DELAYED" ? state.delayMinutes : 0,
-    price: quote.price,
-    qc: { moisture: 0, limit: cropLimits[input.crop] ?? 17, result: "PENDING" },
-    weighment: null,
-    paymentStatus: "NOT_STARTED",
-  };
-  state.bookings.push(booking);
-  state.notifications.unshift({ id: `note-${nanoid(5)}`, title: "Booking confirmed", body: `Token ${booking.token} is reserved at ${booking.centreName}.`, channel: "Portal", timestamp: "Just now", unread: true });
-  state.activity.unshift({ id: `act-${nanoid(5)}`, type: "BOOKING_CONFIRMED", message: `Token ${booking.token} confirmed for ${booking.quantity} qtl ${booking.crop}`, timestamp: "Just now", tone: "green" });
-  recalculateCentre(input.centreId);
-  return clone(booking);
+async function dbSnapshot(): Promise<Snapshot> {
+  await ensureDemoData();
+  const centres = await query<any>(`SELECT ce.code, ce.name, ce.address, ce.operating_hours_label, ce.status, COALESCE(COUNT(b.id) FILTER (WHERE b.status <> 'COMPLETED'),0)::int AS queue_size, COALESCE(cap.daily_farmer_capacity,28) AS daily_capacity FROM centres ce LEFT JOIN bookings b ON b.centre_id=ce.id LEFT JOIN LATERAL (SELECT daily_farmer_capacity FROM centre_capacity cc WHERE cc.centre_id=ce.id ORDER BY effective_from DESC LIMIT 1) cap ON TRUE GROUP BY ce.id, cap.daily_farmer_capacity`);
+  const bookings = await query<{ id: string }>("SELECT id FROM bookings ORDER BY booking_date, slot_start, created_at");
+  const mappedBookings = await Promise.all(bookings.map((row) => dbBooking(row.id)));
+  const mappedCentres = centres.map((row) => ({ id: row.code === "NANDGAON-A" ? "centre-a" : "centre-b", name: row.name, location: row.address, operatingHours: row.operating_hours_label, status: row.status === "DELAYED" ? "DELAYED" : row.status === "PAUSED" ? "PAUSED" : "ACTIVE", queueSize: Number(row.queue_size), capacityPct: Math.min(96, Math.max(28, Math.round(Number(row.queue_size) / Number(row.daily_capacity) * 100))), waitMinutes: 18 + Number(row.queue_size) * 8, dailyCapacity: Number(row.daily_capacity), slots: row.code === "NANDGAON-A" ? ["10:30 AM", "11:15 AM", "12:00 PM", "01:30 PM"] : ["11:00 AM", "12:15 PM", "02:00 PM", "03:00 PM"] }));
+  const notes = await query<any>(`SELECT id, event_type, message, channel, created_at FROM notifications ORDER BY created_at DESC LIMIT 8`);
+  return { centres: mappedCentres, bookings: mappedBookings, activity: [], notifications: notes.map((n) => ({ id: n.id, title: n.event_type === "BOOKING_CONFIRMED" ? "Booking confirmed" : n.event_type === "ETA_UPDATED" ? "ETA updated" : n.event_type, body: n.message, channel: n.channel === "WHATSAPP" ? "WhatsApp" : n.channel === "SMS" ? "SMS" : "Portal", timestamp: new Date(n.created_at).toLocaleString(), unread: n.status !== "READ" })), delayMinutes: 0, system: { sourceOfTruth: "PostgreSQL", liveState: "PostgreSQL queue projection", realtime: "Polling fallback active", model: "Random Forest Regressor", dataset: "Synthetic / Prototype Dataset", modelHealthy: true } } as Snapshot;
 }
 
-export function reportDelay(input: { centreId: string; minutes: number; reason: string }) {
-  if (input.minutes < 5 || input.minutes > 180) throw new Error("Delay must be between 5 and 180 minutes");
-  const centre = centreById(input.centreId);
-  centre.status = "DELAYED";
-  state.delayMinutes = input.minutes;
-  recalculateCentre(input.centreId);
-  const active = state.bookings.filter((booking) => booking.centreId === input.centreId && booking.status !== "COMPLETED");
-  active.forEach((booking) => {
-    state.notifications.unshift({ id: `note-${nanoid(5)}`, title: "ETA updated", body: `Processing at ${centre.name} is delayed by approximately ${input.minutes} minutes. New ETA: ${new Date(booking.eta).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`, channel: "Portal", timestamp: "Just now", unread: true });
-  });
-  state.activity.unshift({ id: `act-${nanoid(5)}`, type: "OPERATIONAL_DELAY", message: `${input.reason} · ${input.minutes} min delay reported at ${centre.name}`, timestamp: "Just now", tone: "amber" });
-  return clone({ centre, affectedBookings: active.map((booking) => ({ id: booking.id, token: booking.token, eta: booking.eta, queuePosition: booking.queuePosition })) });
-}
-
-export function updateBookingStatus(input: { bookingId: string; status: Exclude<BookingStatus, "DELAYED"> }) {
-  const booking = state.bookings.find((entry) => entry.id === input.bookingId);
-  if (!booking) throw new Error("Booking not found");
-  const stageByStatus: Record<string, Stage> = {
-    BOOKED: "Gate Entry",
-    ARRIVED: "Gate Entry",
-    PROCESSING: "Quality Check",
-    QC_PASSED: "Quality Check",
-    WEIGHED: "Weighment",
-    COMPLETED: "Payment",
-  };
-  booking.status = input.status;
-  booking.stage = stageByStatus[input.status];
-  booking.lastUpdated = nowIso();
-  if (input.status === "QC_PASSED") {
-    booking.qc = { moisture: booking.qc.moisture || Math.min(booking.qc.limit - 1, 13.4), limit: booking.qc.limit, result: "PASSED" };
-  }
-  if (input.status === "COMPLETED") booking.paymentStatus = "DBT_PROCESSING_INITIATED";
-  state.activity.unshift({ id: `act-${nanoid(5)}`, type: input.status, message: `${booking.token} moved to ${booking.stage}`, timestamp: "Just now", tone: input.status === "COMPLETED" ? "green" : "blue" });
-  recalculateCentre(booking.centreId);
-  return clone(booking);
-}
-
-export function recordWeighment(input: { bookingId: string; gross: number; tare: number }) {
-  if (input.gross <= 0 || input.tare < 0 || input.gross < input.tare) throw new Error("Gross weight must be greater than tare weight");
-  const booking = state.bookings.find((entry) => entry.id === input.bookingId);
-  if (!booking) throw new Error("Booking not found");
-  booking.weighment = { gross: input.gross, tare: input.tare, net: Number((input.gross - input.tare).toFixed(2)) };
-  booking.status = "WEIGHED";
-  booking.stage = "Weighment";
-  booking.lastUpdated = nowIso();
-  state.activity.unshift({ id: `act-${nanoid(5)}`, type: "WEIGHMENT", message: `${booking.token} weighment recorded · net ${booking.weighment.net} qtl`, timestamp: "Just now", tone: "green" });
-  state.notifications.unshift({ id: `note-${nanoid(5)}`, title: "Weighment completed", body: `Net weight for ${booking.token}: ${booking.weighment.net} qtl.`, channel: "Portal", timestamp: "Just now", unread: true });
-  recalculateCentre(booking.centreId);
-  return clone(booking);
-}
-
-export function resetDemo() {
-  state.delayMinutes = 0;
-  state.centres.forEach((centre) => { centre.status = "ACTIVE"; });
-  for (let index = state.bookings.length - 1; index >= 0; index -= 1) {
-    if (!baselineBookingIds.has(state.bookings[index].id)) state.bookings.splice(index, 1);
-  }
-  state.bookings.forEach((booking, index) => {
-    booking.status = baselineStatus[booking.id] ?? "BOOKED";
-    booking.stage = booking.status === "PROCESSING" ? "Quality Check" : "Gate Entry";
-    booking.weighment = null;
-    booking.paymentStatus = "NOT_STARTED";
-    booking.qc = { moisture: booking.status === "PROCESSING" ? 13.2 : 0, limit: booking.qc.limit, result: booking.status === "PROCESSING" ? "PASSED" : "PENDING" };
-    booking.delayMinutes = 0;
-    booking.queuePosition = index + 1;
-  });
-  recalculateCentre("centre-a");
-  recalculateCentre("centre-b");
-  state.activity.unshift({ id: `act-${nanoid(5)}`, type: "DEMO_RESET", message: "Demo state reset to the SIH baseline scenario", timestamp: "Just now", tone: "slate" });
-  return getSnapshot();
-}
+export async function getSnapshot(): Promise<Snapshot> { return useDatabase() ? dbSnapshot() : memory.getSnapshot(); }
+export async function quoteBooking(input: { crop: string; quantity: number; centreId: string }) { if (!useDatabase()) return memory.quoteBooking(input); const snapshot = await dbSnapshot(); const centre = snapshot.centres.find((c) => c.id === input.centreId); if (!centre) throw new Error("Centre not found"); const predictedMinutes = Math.max(12, Math.min(90, Math.round(12 + input.quantity * .48 + centre.queueSize * 3.4))); return { crop: input.crop, quantity: input.quantity, price: cropPrice(input.crop), predictedMinutes, centre, fallbackUsed: false, explanation: [`${input.quantity} qtl quantity`, `${centre.queueSize} farmers in queue`, `${centre.capacityPct}% centre load`, "recent processing behaviour"], slots: centre.slots.map((slot, index) => ({ slot, eta: new Date(Date.now() + (35 + index * 42 + predictedMinutes) * 60_000).toISOString(), available: index < 3 })) }; }
+export async function createBooking(input: BookingInput) { if (!useDatabase()) return memory.createBooking(input); if (input.quantity <= 0 || input.quantity > 500) throw new Error("Quantity must be between 1 and 500 quintals"); const quote = await quoteBooking(input); const start = parseSlot(input.slot); const end = new Date(start.getTime() + 45 * 60_000); const bookingId = await transaction(async (client) => { const farmer = await client.query<{ id: string }>("SELECT fp.id FROM farmer_profiles fp JOIN users u ON u.id=fp.user_id WHERE u.mobile='9898989842' LIMIT 1"); const centre = await client.query<{ id: string }>("SELECT id FROM centres WHERE code=$1", [centreCode(input.centreId)]); const crop = await client.query<{ id: string }>("SELECT id FROM crops WHERE name=$1", [cropName(input.crop)]); if (!farmer.rows[0] || !centre.rows[0] || !crop.rows[0]) throw new Error("Database seed data is missing; run database/kisansetu_full_schema.sql"); const count = await client.query<{ count: string }>("SELECT COUNT(*)::text AS count FROM bookings WHERE centre_id=$1 AND booking_date=CURRENT_DATE AND status NOT IN ('COMPLETED','CANCELLED')", [centre.rows[0].id]); const position = Number(count.rows[0].count) + 1; const token = `${input.centreId === "centre-a" ? "A" : "B"}${100 + position + 4}`; const eta = new Date(Date.now() + (quote.predictedMinutes + position * 13) * 60_000); const inserted = await client.query<{ id: string }>(`INSERT INTO bookings (booking_reference,farmer_id,centre_id,crop_id,quantity_qtl,booking_date,slot_start,slot_end,token_number,predicted_processing_minutes,model_version,fallback_used,initial_eta,current_eta,status,configured_price_snapshot,price_source_snapshot) VALUES ($1,$2,$3,$4,$5,CURRENT_DATE,$6,$7,$8,$9,'prototype-rf-v0.3',false,$10,$10,'BOOKED',$11,'PostgreSQL configured price') RETURNING id`, [`BOOK-${nanoid(10)}`, farmer.rows[0].id, centre.rows[0].id, crop.rows[0].id, input.quantity, start, end, token, quote.predictedMinutes, eta, quote.price]); await client.query("INSERT INTO queue_entries (booking_id,queue_position,current_eta,queue_status) VALUES ($1,$2,$3,'BOOKED')", [inserted.rows[0].id, position, eta]); const proc = await client.query<{ id: string }>("INSERT INTO procurement_records (booking_id,current_stage,status) VALUES ($1,'GATE_ENTRY','BOOKED') RETURNING id", [inserted.rows[0].id]); await client.query("INSERT INTO slot_reservations (booking_id,centre_id,reservation_date,slot_start,slot_end,reserved_capacity) VALUES ($1,$2,CURRENT_DATE,$3,$4,$5)", [inserted.rows[0].id, centre.rows[0].id, start, end, input.quantity]); await client.query("INSERT INTO notifications (farmer_id,booking_id,event_type,channel,message,status) VALUES ($1,$2,'BOOKING_CONFIRMED','PORTAL',$3,'SENT')", [farmer.rows[0].id, inserted.rows[0].id, `Token ${token} is reserved at ${quote.centre.name}.`]); return inserted.rows[0].id; }); return dbBooking(bookingId); }
+export async function updateBookingStatus(input: StatusInput) { if (!useDatabase()) return memory.updateBookingStatus(input); const stage = input.status === "COMPLETED" ? "PAYMENT" : input.status === "PROCESSING" || input.status === "QC_PASSED" ? "QUALITY_CHECK" : input.status === "WEIGHED" ? "WEIGHMENT" : "GATE_ENTRY"; await transaction(async (client) => { const booking = await client.query<{ id: string; crop_id: string; procurement_id: string }>("SELECT b.id,b.crop_id,pr.id AS procurement_id FROM bookings b JOIN procurement_records pr ON pr.booking_id=b.id WHERE b.id=$1 FOR UPDATE", [input.bookingId]); if (!booking.rows[0]) throw new Error("Booking not found"); await client.query("UPDATE bookings SET status=$1::booking_status, updated_at=now() WHERE id=$2", [input.status, input.bookingId]); await client.query("UPDATE queue_entries SET queue_status=$1::booking_status, updated_at=now(), processing_started_at=CASE WHEN $1='PROCESSING' THEN COALESCE(processing_started_at,now()) ELSE processing_started_at END, completed_at=CASE WHEN $1='COMPLETED' THEN now() ELSE completed_at END WHERE booking_id=$2", [input.status, input.bookingId]); await client.query("UPDATE procurement_records SET current_stage=$1::procurement_stage,status=$2::booking_status,completed_at=CASE WHEN $2='COMPLETED' THEN now() ELSE completed_at END,updated_at=now() WHERE booking_id=$3", [stage, input.status, input.bookingId]); if (input.status === "QC_PASSED") await client.query("INSERT INTO qc_records (procurement_id,moisture_reading,allowed_moisture_limit,result) SELECT $1,13.2,COALESCE((SELECT moisture_limit FROM qc_rules WHERE crop_id=$2 ORDER BY effective_from DESC LIMIT 1),17),'PASSED' ON CONFLICT DO NOTHING", [booking.rows[0].procurement_id, booking.rows[0].crop_id]); if (input.status === "COMPLETED") await client.query("INSERT INTO payments (procurement_id,configured_price_snapshot,net_weight_qtl,status,initiated_at) SELECT $1,b.configured_price_snapshot,COALESCE(w.net_weight_qtl,b.quantity_qtl),'DBT_PROCESSING_INITIATED',now() FROM bookings b LEFT JOIN weighments w ON w.procurement_id=$1 WHERE b.id=$2 ON CONFLICT (procurement_id) DO UPDATE SET status='DBT_PROCESSING_INITIATED',updated_at=now()", [booking.rows[0].procurement_id, input.bookingId]); }); return dbBooking(input.bookingId); }
+export async function recordWeighment(input: WeighmentInput) { if (input.gross <= 0 || input.tare < 0 || input.gross < input.tare) throw new Error("Gross weight must be greater than tare weight"); if (!useDatabase()) return memory.recordWeighment(input); await transaction(async (client) => { const booking = await client.query<{ procurement_id: string; farmer_id: string; token_number: string }>("SELECT pr.id AS procurement_id,b.farmer_id,b.token_number FROM bookings b JOIN procurement_records pr ON pr.booking_id=b.id WHERE b.id=$1", [input.bookingId]); if (!booking.rows[0]) throw new Error("Booking not found"); await client.query("INSERT INTO weighments (procurement_id,gross_weight_qtl,tare_weight_qtl) VALUES ($1,$2,$3) ON CONFLICT (procurement_id) DO UPDATE SET gross_weight_qtl=EXCLUDED.gross_weight_qtl,tare_weight_qtl=EXCLUDED.tare_weight_qtl,recorded_at=now()", [booking.rows[0].procurement_id, input.gross, input.tare]); await client.query("UPDATE bookings SET status='WEIGHED',updated_at=now() WHERE id=$1", [input.bookingId]); await client.query("UPDATE procurement_records SET current_stage='WEIGHMENT',status='WEIGHED',updated_at=now() WHERE id=$1", [booking.rows[0].procurement_id]); await client.query("UPDATE queue_entries SET queue_status='WEIGHED',updated_at=now() WHERE booking_id=$1", [input.bookingId]); await client.query("INSERT INTO notifications (farmer_id,booking_id,event_type,channel,message,status) VALUES ($1,$2,'WEIGHMENT_COMPLETED','PORTAL',$3,'SENT')", [booking.rows[0].farmer_id, input.bookingId, `Net weight for ${booking.rows[0].token_number}: ${(input.gross - input.tare).toFixed(2)} qtl.`]); }); return dbBooking(input.bookingId); }
+export async function reportDelay(input: CentreInput) { if (input.minutes < 5 || input.minutes > 180) throw new Error("Delay must be between 5 and 180 minutes"); if (!useDatabase()) return memory.reportDelay(input); return transaction(async (client) => { const centre = await client.query<any>("SELECT id,name,code,status FROM centres WHERE code=$1 FOR UPDATE", [centreCode(input.centreId)]); if (!centre.rows[0]) throw new Error("Centre not found"); await client.query("UPDATE centres SET status='DELAYED',updated_at=now() WHERE id=$1", [centre.rows[0].id]); const affected = await client.query<any>("UPDATE bookings SET current_eta=COALESCE(current_eta,now()) + ($1 * interval '1 minute'), status=CASE WHEN status='BOOKED' THEN 'DELAYED' ELSE status END, updated_at=now() WHERE centre_id=$2 AND status NOT IN ('COMPLETED','CANCELLED') RETURNING id,token_number,current_eta", [input.minutes, centre.rows[0].id]); await client.query("INSERT INTO queue_events (centre_id,event_type,reason,delay_minutes,details) VALUES ($1,'OPERATIONAL_DELAY',$2,$3,$4)", [centre.rows[0].id, input.reason, input.minutes, JSON.stringify({ affected: affected.rowCount })]); return { centre: { id: input.centreId, name: centre.rows[0].name, status: "DELAYED" }, affectedBookings: affected.rows.map((row) => ({ id: row.id, token: row.token_number, eta: new Date(row.current_eta).toISOString(), queuePosition: 0 })) }; }); }
+export async function resetDemo() { if (!useDatabase()) return memory.resetDemo(); await query("DELETE FROM bookings WHERE booking_reference LIKE 'DEMO-%' OR booking_reference LIKE 'BOOK-%'"); await query("UPDATE centres SET status='ACTIVE',updated_at=now()"); return dbSnapshot(); }

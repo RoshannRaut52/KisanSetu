@@ -12,10 +12,10 @@ Set these variables in Render:
 ```text
 NODE_ENV=production
 FRONTEND_ORIGIN=https://frontend-tan-eight-75.vercel.app
-DATABASE_URL=postgresql://roshan:tt8XMRCxnuDxnNiBsrA86DHXIRFQIOks@dpg-dar1gi0473hc739g8m9g-a/kisansetu_gx11
+DATABASE_URL=<Render PostgreSQL Internal Database URL — set only in Render, never commit it>
 OTP_MODE=mock
 WHATSAPP_ENABLED=false
 TWILIO_ENABLED=false
 ```
 
-The current SIH demo domain is in-memory so it can be run immediately. `DATABASE_URL` is included for the PostgreSQL migration described in `../database/README.md`; connect the repository layer to the tables before treating the backend as production-persistent.
+With `DATABASE_URL` configured, the backend uses PostgreSQL for centres, bookings, queue entries, procurement, QC, weighment, payment references, notifications, and queue events. Unit tests use the deterministic in-memory adapter when `NODE_ENV=test`.
