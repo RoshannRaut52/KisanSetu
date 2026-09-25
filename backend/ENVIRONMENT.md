@@ -11,8 +11,8 @@ Set these variables in Render:
 
 ```text
 NODE_ENV=production
-FRONTEND_ORIGIN=https://your-frontend.vercel.app
-DATABASE_URL=<Render PostgreSQL Internal Database URL>
+FRONTEND_ORIGIN=https://frontend-tan-eight-75.vercel.app
+DATABASE_URL=postgresql://roshan:tt8XMRCxnuDxnNiBsrA86DHXIRFQIOks@dpg-dar1gi0473hc739g8m9g-a/kisansetu_gx11
 OTP_MODE=mock
 WHATSAPP_ENABLED=false
 TWILIO_ENABLED=false

@@ -3,11 +3,18 @@ import { createServer } from "node:http";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { appRouter } from "./routers";
 import { createContext } from "./context";
+import { checkDatabaseConnection } from "./db";
+
 
 const app = express();
 const server = createServer(app);
 const port = Number(process.env.PORT || 10000);
-const frontendOrigin = process.env.FRONTEND_ORIGIN || "*";
+const frontendOrigin = process.env.FRONTEND_ORIGIN;
+
+if (!frontendOrigin) {
+  throw new Error("FRONTEND_ORIGIN is required in production");
+}
+
 
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", frontendOrigin);
@@ -19,7 +26,26 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json({ limit: "2mb" }));
-app.get("/healthz", (_req, res) => res.json({ ok: true, service: "kisansetu-api", timestamp: new Date().toISOString() }));
+app.get("/healthz", async (_req, res) => {
+  try {
+    await checkDatabaseConnection();
+
+    res.json({
+      ok: true,
+      service: "kisansetu-api",
+      database: "connected",
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("[Health] Database connection failed", error);
+
+    res.status(503).json({
+      ok: false,
+      service: "kisansetu-api",
+      database: "disconnected",
+    });
+  }
+});
 app.use("/api/trpc", createExpressMiddleware({ router: appRouter, createContext }));
 
 server.listen(port, "0.0.0.0", () => {
