@@ -55,7 +55,7 @@ async function ensureDemoData() {
       const booking = await client.query<{ id: string }>(
         `INSERT INTO bookings (booking_reference, farmer_id, centre_id, crop_id, quantity_qtl, booking_date, slot_start, slot_end, token_number, predicted_processing_minutes, model_version, fallback_used, initial_eta, current_eta, status, configured_price_snapshot, price_source_snapshot)
          VALUES ($1,$2,$3,$4,$5,CURRENT_DATE,$6,$7,$8,$9,'prototype-rf-v0.3',true,$10,$10,$11::booking_status,$12,'SIH prototype configured reference') RETURNING id`,
-        [reference, farmerProfile.rows[0].id, centresByCode[code], cropsByName[crop], quantity, start, end, token, 24 + quantity / 3, eta, status, cropPrice(crop)],
+        [reference, farmerProfile.rows[0].id, centresByCode[code], cropsByName[crop], quantity, start, end, token, Math.round(24 + quantity / 3 ), eta, status, cropPrice(crop)],
       );
       await client.query(`INSERT INTO queue_entries (booking_id, queue_position, current_eta, queue_status) VALUES ($1,$2,$3,$4::booking_status)`, [booking.rows[0].id, code === 'NANDGAON-A' ? Number(token.slice(1)) - 100 : Number(token.slice(1)) - 200, eta, status]);
       const stage = status === 'PROCESSING' || status === 'ARRIVED' ? 'QUALITY_CHECK' : 'GATE_ENTRY';
