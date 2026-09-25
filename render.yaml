@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: kisansetu-api
+    runtime: node
+    rootDir: backend
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: FRONTEND_ORIGIN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: OTP_MODE
+        value: mock
+      - key: WHATSAPP_ENABLED
+        value: "false"
+      - key: TWILIO_ENABLED
+        value: "false"
