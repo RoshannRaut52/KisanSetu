@@ -9,7 +9,8 @@ import { checkDatabaseConnection } from "./db";
 const app = express();
 const server = createServer(app);
 const port = Number(process.env.PORT || 10000);
-const frontendOrigin = process.env.FRONTEND_ORIGIN;
+const frontendOrigin = process.env.FRONTEND_ORIGIN?.replace(/\/$/, "");
+
 
 if (!frontendOrigin) {
   throw new Error("FRONTEND_ORIGIN is required in production");
